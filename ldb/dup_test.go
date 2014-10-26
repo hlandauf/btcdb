@@ -10,9 +10,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/conformal/btcdb"
-	"github.com/conformal/btcutil"
-	"github.com/conformal/btcwire"
+	"github.com/hlandauf/btcdb"
+	"github.com/hlandauf/btcutil"
+	"github.com/hlandauf/btcwire"
 )
 
 func Test_dupTx(t *testing.T) {

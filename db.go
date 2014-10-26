@@ -7,8 +7,8 @@ package btcdb
 import (
 	"errors"
 
-	"github.com/conformal/btcutil"
-	"github.com/conformal/btcwire"
+	"github.com/hlandauf/btcutil"
+	"github.com/hlandauf/btcwire"
 )
 
 // Errors that the various database functions may return.

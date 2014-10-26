@@ -14,12 +14,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/conformal/btcdb"
-	_ "github.com/conformal/btcdb/ldb"
-	_ "github.com/conformal/btcdb/memdb"
-	"github.com/conformal/btcnet"
-	"github.com/conformal/btcutil"
-	"github.com/conformal/btcwire"
+	"github.com/hlandauf/btcdb"
+	_ "github.com/hlandauf/btcdb/ldb"
+	_ "github.com/hlandauf/btcdb/memdb"
+	"github.com/hlandauf/btcnet"
+	"github.com/hlandauf/btcutil"
+	"github.com/hlandauf/btcwire"
 )
 
 var (

@@ -14,10 +14,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/conformal/btcdb"
-	"github.com/conformal/btcnet"
-	"github.com/conformal/btcutil"
-	"github.com/conformal/btcwire"
+	"github.com/hlandauf/btcdb"
+	"github.com/hlandauf/btcnet"
+	"github.com/hlandauf/btcutil"
+	"github.com/hlandauf/btcwire"
 )
 
 var network = btcwire.MainNet

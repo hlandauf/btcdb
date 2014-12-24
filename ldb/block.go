@@ -8,10 +8,10 @@ import (
 	"bytes"
 	"encoding/binary"
 
+	"github.com/conformal/goleveldb/leveldb"
 	"github.com/hlandauf/btcdb"
 	"github.com/hlandauf/btcutil"
 	"github.com/hlandauf/btcwire"
-	"github.com/conformal/goleveldb/leveldb"
 )
 
 // FetchBlockBySha - return a btcutil Block

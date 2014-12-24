@@ -9,6 +9,7 @@ import (
 
 	"github.com/hlandauf/btcutil"
 	"github.com/hlandauf/btcwire"
+  "github.com/hlandauf/btcnamedb"
 )
 
 // Errors that the various database functions may return.
@@ -113,6 +114,8 @@ type Db interface {
 	// Sync verifies that the database is coherent on disk and no
 	// outstanding transactions are in flight.
 	Sync() (err error)
+
+  NameDB() btcnamedb.DB
 }
 
 // DriverDB defines a structure for backend drivers to use when they registered

@@ -8,10 +8,10 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/hlandauf/btcdb"
 	"github.com/hlandauf/btcutil"
 	"github.com/hlandauf/btcwire"
-	"github.com/davecgh/go-spew/spew"
 )
 
 // testContext is used to store context information about a running test which

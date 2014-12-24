@@ -10,14 +10,19 @@ import (
 	"os"
 	"strconv"
 	"sync"
+  "path/filepath"
 
-	"github.com/hlandauf/btcdb"
-	"github.com/conformal/btclog"
-	"github.com/hlandauf/btcutil"
-	"github.com/hlandauf/btcwire"
 	"github.com/conformal/goleveldb/leveldb"
 	"github.com/conformal/goleveldb/leveldb/cache"
 	"github.com/conformal/goleveldb/leveldb/opt"
+	"github.com/hlandauf/btcdb"
+	"github.com/hlandauf/btcutil"
+	"github.com/hlandauf/btcwire"
+	"github.com/hlandauf/btcnet"
+	"github.com/hlandauf/btcscript"
+  "github.com/hlandauf/btcnamedb"
+  "github.com/hlandau/xlog"
+  _ "github.com/hlandauf/btcnamedb/nameldb"
 )
 
 const (
@@ -26,7 +31,7 @@ const (
 	dbMaxTransMem     = 64 * 1024 * 1024 // 64 MB
 )
 
-var log = btclog.Disabled
+var log, Log = xlog.New("btc.db.ldb")
 
 type tTxInsertData struct {
 	txsha   *btcwire.ShaHash
@@ -56,6 +61,8 @@ type LevelDb struct {
 
 	txUpdateMap      map[btcwire.ShaHash]*txUpdateObj
 	txSpentUpdateMap map[btcwire.ShaHash]*spentTxUpdate
+
+  nameDB btcnamedb.DB
 }
 
 var self = btcdb.DriverDB{DbType: "leveldb", CreateDB: CreateDB, OpenDB: OpenDB}
@@ -84,8 +91,6 @@ func OpenDB(args ...interface{}) (btcdb.Db, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	log = btcdb.GetLog()
 
 	db, err := openDB(dbpath, false)
 	if err != nil {
@@ -153,6 +158,7 @@ var CurrentDBVersion int32 = 1
 func openDB(dbpath string, create bool) (pbdb btcdb.Db, err error) {
 	var db LevelDb
 	var tlDb *leveldb.DB
+  var nameDB btcnamedb.DB
 	var dbversion int32
 
 	defer func() {
@@ -161,6 +167,8 @@ func openDB(dbpath string, create bool) (pbdb btcdb.Db, err error) {
 
 			db.txUpdateMap = map[btcwire.ShaHash]*txUpdateObj{}
 			db.txSpentUpdateMap = make(map[btcwire.ShaHash]*spentTxUpdate)
+
+      db.nameDB = nameDB
 
 			pbdb = &db
 		}
@@ -235,6 +243,12 @@ func openDB(dbpath string, create bool) (pbdb btcdb.Db, err error) {
 		}
 	}
 
+  if create {
+    nameDB, err = btcnamedb.CreateDB("leveldb", filepath.Join(dbpath,"../names_leveldb"))
+  } else {
+    nameDB, err = btcnamedb.OpenDB("leveldb", filepath.Join(dbpath,"../names_leveldb"))
+  }
+
 	return
 }
 
@@ -244,8 +258,6 @@ func CreateDB(args ...interface{}) (btcdb.Db, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	log = btcdb.GetLog()
 
 	// No special setup needed, just OpenBB
 	db, err := openDB(dbpath, true)
@@ -258,6 +270,8 @@ func CreateDB(args ...interface{}) (btcdb.Db, error) {
 }
 
 func (db *LevelDb) close() error {
+  db.nameDB.Close() // XXX: error handling
+
 	return db.lDb.Close()
 }
 
@@ -313,6 +327,12 @@ func (db *LevelDb) DropAfterBlockBySha(sha *btcwire.ShaHash) (rerr error) {
 			return err
 		}
 
+    err = db.undoNames(height)
+    if err != nil {
+      log.Warnf("Cannot undo names at height %d: %v", height, err)
+      return err
+    }
+
 		for _, tx := range blk.MsgBlock().Transactions {
 			err = db.unSpend(tx)
 			if err != nil {
@@ -327,6 +347,12 @@ func (db *LevelDb) DropAfterBlockBySha(sha *btcwire.ShaHash) (rerr error) {
 		}
 		db.lBatch().Delete(shaBlkToKey(blksha))
 		db.lBatch().Delete(int64ToKey(height))
+
+    _, err = db.expireNames(height+1, true)
+    if err != nil {
+      log.Warnf("Cannot unexpire names at height %d: %v", height, err)
+      return err
+    }
 	}
 
 	db.nextBlock = keepidx + 1
@@ -338,12 +364,12 @@ func (db *LevelDb) DropAfterBlockBySha(sha *btcwire.ShaHash) (rerr error) {
 // database.  The first block inserted into the database will be treated as the
 // genesis block.  Every subsequent block insert requires the referenced parent
 // block to already exist.
-func (db *LevelDb) InsertBlock(block *btcutil.Block) (height int64, rerr error) {
+func (db *LevelDb) InsertBlock(block *btcutil.Block) (height int64, err error) {
 	db.dbLock.Lock()
 	defer db.dbLock.Unlock()
 	defer func() {
-		if rerr == nil {
-			rerr = db.processBatches()
+		if err == nil {
+			err = db.processBatches()
 		} else {
 			db.lBatch().Reset()
 		}
@@ -403,42 +429,25 @@ func (db *LevelDb) InsertBlock(block *btcutil.Block) (height int64, rerr error) 
 		// first as fully spent.
 		// http://blockexplorer.com/b/91812 dup in 91842
 		// http://blockexplorer.com/b/91722 dup in 91880
-		if newheight == 91812 {
-			dupsha, err := btcwire.NewShaHashFromStr("d5d27987d2a3dfc724e359870c6644b40e497bdc0589a033220fe15429d88599")
-			if err != nil {
-				panic("invalid sha string in source")
-			}
-			if txsha.IsEqual(dupsha) {
-				// marking TxOut[0] as spent
-				po := btcwire.NewOutPoint(dupsha, 0)
-				txI := btcwire.NewTxIn(po, []byte("garbage"))
+    if bugType, _ := btcnet.IsHistoricBug(newheight, txsha); bugType == btcnet.BugBitcoin {
+      err = db.bugSpendOutput(txsha, 0)
 
-				var spendtx btcwire.MsgTx
-				spendtx.AddTxIn(txI)
-				err = db.doSpend(&spendtx)
-				if err != nil {
-					log.Warnf("block %v idx %v failed to spend tx %v %v err %v", blocksha, newheight, &txsha, txidx, err)
-				}
-			}
-		}
-		if newheight == 91722 {
-			dupsha, err := btcwire.NewShaHashFromStr("e3bf3d07d4b0375638d5f1db5255fe07ba2c4cb067cd81b84ee974b6585fb468")
-			if err != nil {
-				panic("invalid sha string in source")
-			}
-			if txsha.IsEqual(dupsha) {
-				// marking TxOut[0] as spent
-				po := btcwire.NewOutPoint(dupsha, 0)
-				txI := btcwire.NewTxIn(po, []byte("garbage"))
+      if err != nil {
+        log.Warnf("block %v idx %v failed to spend tx %v %v err %v", blocksha, newheight, &txsha, txidx, err)
+      }
+    }
 
-				var spendtx btcwire.MsgTx
-				spendtx.AddTxIn(txI)
-				err = db.doSpend(&spendtx)
-				if err != nil {
-					log.Warnf("block %v idx %v failed to spend tx %v %v err %v", blocksha, newheight, &txsha, txidx, err)
-				}
-			}
-		}
+    err = db.applyNameTransaction(tx, txsha, newheight)
+    if err != nil {
+      log.Warnf("couldn't apply name tx: %v", err)
+      return 0, err
+    }
+
+    _, err = db.expireNames(newheight+1, false)
+    if err != nil {
+      log.Warnf("couldn't expire names: %v", err)
+      return 0, err
+    }
 
 		err = db.doSpend(tx)
 		if err != nil {
@@ -447,6 +456,231 @@ func (db *LevelDb) InsertBlock(block *btcutil.Block) (height int64, rerr error) 
 		}
 	}
 	return newheight, nil
+}
+
+func (db *LevelDb) applyNameTransaction(tx *btcwire.MsgTx, txsha *btcwire.ShaHash, txHeight int64) error {
+  bugType, isBug := btcnet.IsHistoricBug(txHeight, txsha)
+  if isBug && bugType != btcnet.BugBitcoin && bugType != btcnet.BugFullyApply {
+    // namecore:names.cpp:ApplyNameTransaction
+    if bugType == btcnet.BugFullyIgnore {
+      for i, txOut := range tx.TxOut {
+        ns, err := btcscript.NewNameScriptFromPk(txOut.PkScript)
+        if err == nil && ns.IsAnyUpdate() {
+          err = db.bugSpendOutput(txsha, uint32(i))
+          if err != nil {
+            return fmt.Errorf("Cannot spend buggy name output: %v", err)
+          }
+        }
+      }
+    }
+
+    return nil
+  }
+
+  if !tx.IsNamecoin() {
+    return nil
+  }
+
+  for i, txOut := range tx.TxOut {
+    ns, err := btcscript.NewNameScriptFromPk(txOut.PkScript)
+    if err == nil && ns.IsAnyUpdate() {
+      name  := ns.OpName()
+      value := ns.OpValue()
+
+      nameInfo := btcwire.NameInfo{
+        Key:       name,
+        Value:     value,
+        Height:    txHeight,
+        OutPoint:  btcwire.NewOutPoint(txsha, uint32(i)),
+        Addr:      txOut.PkScript,
+      }
+
+      err = db.nameDB.Set(nameInfo)
+      if err != nil {
+        return err
+      }
+    } else if err != nil {
+      //log.Warnf("Namecoin transaction script parse error: %v", err)
+    }
+  }
+
+  return nil
+}
+
+func (db *LevelDb) expireNames(height int64, unexpire bool) (names []string, err error) {
+  // The genesis block contains no name expirations.
+  if height == 0 {
+    return
+  }
+
+  // Find out at which update heights names have expired since
+  // the last block. If the expiration depth changes, this could
+  // be multiple names at once.
+  expDepthOld := btcwire.NameExpirationDepth(height-1)
+  expDepthNow := btcwire.NameExpirationDepth(height)
+
+  if expDepthNow > height {
+    return
+  }
+
+  // Both are exclusive. The last expireTo was height-1-expDepthOld,
+  // now we start at this value+1.
+  expireFrom := height - expDepthOld
+  expireTo   := height - expDepthNow
+
+  // It is possible that expireFrom = expireTo+1, in case that the
+  // expiration period is raised together with the block height. In
+  // this case, no names expire in the current step. This case means
+  // that the absolute expiration height "n - expirationDepth(n)" is
+  // flat -- which is fine.
+  if expireFrom > (expireTo+1) {
+    panic("unexpected")
+  }
+
+  // Find all names that expire at those depths.
+  expiringNames := map[string]struct{}{}
+
+  for h := expireFrom; h <= expireTo; h++ {
+    xnames, err := db.nameDB.GetNamesAtHeight(h)
+    if err != nil {
+      return nil, fmt.Errorf("expiry: couldn't get names at height: %d: %v", h, err)
+    }
+
+    for _, n := range xnames {
+      expiringNames[n] = struct{}{}
+    }
+  }
+
+  // Expire all those names.
+  for name := range expiringNames {
+    ni, err := db.nameDB.GetByKey(name)
+    if err != nil {
+      return nil, fmt.Errorf("expiry: couldn't get expiring key (%d): %v: %v", height, name, err)
+    }
+
+    if !ni.IsExpired(height) {
+      return nil, fmt.Errorf("name is not actually expired: %s: height=%d, oldHeight=%d", name, height, ni.Height)
+    }
+
+    // Special rule: When d/postmortem expires (the name used by libcoin in the
+    // name-stealing demonstration), its coin is already spent. Ignore.
+    if height == 175868 && name == "d/postmortem" {
+      continue
+    }
+
+    if unexpire {
+      unspendErr := db.clearSpentData(&ni.OutPoint.Hash, ni.OutPoint.Index)
+      if unspendErr != nil {
+        log.Warnf("unexpiry: couldn't unspend output of de-expired name: %v: %v", name, unspendErr)
+      }
+    } else {
+      spendErr := db.bugSpendOutput(&ni.OutPoint.Hash, ni.OutPoint.Index)
+      if spendErr != nil {
+        log.Warnf("expiry: couldn't spend output of expired name: %v: %v", name, spendErr)
+      }
+    }
+  }
+
+  for k := range expiringNames {
+    names = append(names, k)
+  }
+
+  return
+}
+
+func (db *LevelDb) undoNames(height int64) error {
+  xnames, err := db.nameDB.GetNamesAtHeight(height)
+  if err != nil {
+    return err
+  }
+
+  for _, name := range xnames {
+    ni, err := db.nameDB.GetByKey(name)
+    if err != nil {
+      return fmt.Errorf("name undo: couldn't get name being undone at height %d: %v: %v", height, name, err)
+    }
+
+    if ni.Height != height {
+      return fmt.Errorf("name undo: current name in database is not at height being undone: %v: %v != %v", name, ni.Height, height)
+    }
+
+    // Get the transaction via its out point so that we can find the input.
+    tx, _, _, _, err := db.fetchTxDataBySha(&ni.OutPoint.Hash) // unspent txs
+    if err != nil {
+      return err
+    }
+
+    // Find the transaction which was the input to the current transaction,
+    // the "n-1" transaction.
+    var nmcPrevTx *btcwire.MsgTx
+    var nmcPrevTxBlockHeight int64
+    var nmcPrevTxSha *btcwire.ShaHash
+    var nmcPrevNS *btcscript.NameScript
+    var nmcPrevTxOutputIndex uint32
+    var nmcPrevPkScript []byte
+    for _, txIn := range tx.TxIn {
+      // XXX: retrieves last spent tx, ignores other txs with same txid
+      prevTx, err := db.fetchLastSpentTx(&txIn.PreviousOutPoint.Hash)
+      if err != nil {
+        return err
+      }
+
+      prevTxOut := prevTx.Tx.TxOut[txIn.PreviousOutPoint.Index]
+      prevNS, err := btcscript.NewNameScriptFromPk(prevTxOut.PkScript)
+      if err == nil { // is name op
+        nmcPrevTx = prevTx.Tx
+        nmcPrevTxBlockHeight = prevTx.Height
+        nmcPrevNS = prevNS
+        nmcPrevTxOutputIndex = txIn.PreviousOutPoint.Index
+        nmcPrevPkScript = prevTxOut.PkScript
+        nmcPrevTxSha = prevTx.Sha
+        break
+      }
+    }
+
+    if nmcPrevTx == nil {
+      // no preceding namecoin transaction found, this shouldn't be possible.
+      return fmt.Errorf("no previous namecoin transaction found while undoing name: %v: %v", name, height)
+    }
+
+    // If that transaction is a firstupdate or update transaction, set the
+    // name data accordingly. Otherwise delete the name.
+    if nmcPrevNS.IsAnyUpdate() {
+      ni := btcwire.NameInfo{
+        Key: name,
+        Value: nmcPrevNS.OpValue(),
+        Height: nmcPrevTxBlockHeight,
+        OutPoint: btcwire.NewOutPoint(nmcPrevTxSha, nmcPrevTxOutputIndex),
+        Addr: nmcPrevPkScript,
+      }
+      err = db.NameDB().Set(ni)
+      if err != nil {
+        return err
+      }
+    } else {
+      err = db.NameDB().DeleteName(name)
+      if err != nil {
+        return err
+      }
+    }
+  }
+
+  // Delete the name-at-height entries and scrub the history.
+  err = db.NameDB().DropAtHeight(height)
+  if err != nil {
+    return err
+  }
+
+  return nil
+}
+
+func (db *LevelDb) bugSpendOutput(txsha *btcwire.ShaHash, outputIdx uint32) error {
+  po  := btcwire.NewOutPoint(txsha, uint32(outputIdx))
+  txI := btcwire.NewTxIn(po, []byte("garbage"))
+
+  var spendtx btcwire.MsgTx
+  spendtx.AddTxIn(txI)
+  return db.doSpend(&spendtx)
 }
 
 // doSpend iterates all TxIn in a bitcoin transaction marking each associated
@@ -693,4 +927,8 @@ func (db *LevelDb) RollbackClose() error {
 	defer db.dbLock.Unlock()
 
 	return db.close()
+}
+
+func (db *LevelDb) NameDB() btcnamedb.DB {
+  return db.nameDB
 }

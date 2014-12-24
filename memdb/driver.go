@@ -8,10 +8,10 @@ import (
 	"fmt"
 
 	"github.com/hlandauf/btcdb"
-	"github.com/conformal/btclog"
+  "github.com/hlandau/xlog"
 )
 
-var log = btclog.Disabled
+var log, Log = xlog.New("btc.db.memdb")
 
 func init() {
 	driver := btcdb.DriverDB{DbType: "memdb", CreateDB: CreateDB, OpenDB: OpenDB}
@@ -44,6 +44,5 @@ func CreateDB(args ...interface{}) (btcdb.Db, error) {
 		return nil, err
 	}
 
-	log = btcdb.GetLog()
 	return newMemDb(), nil
 }

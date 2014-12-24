@@ -13,6 +13,7 @@ import (
 	"github.com/hlandauf/btcdb"
 	"github.com/hlandauf/btcutil"
 	"github.com/hlandauf/btcwire"
+  "github.com/hlandauf/btcnamedb"
 )
 
 // Errors that the various database functions may return.
@@ -729,6 +730,11 @@ func (db *MemDb) Sync() error {
 	// the lock is still grabbed to ensure the function does not return
 	// until other operations are complete.
 	return nil
+}
+
+func (db *MemDb) NameDB() btcnamedb.DB {
+  // TODO
+  return nil
 }
 
 // newMemDb returns a new memory-only database ready for block inserts.

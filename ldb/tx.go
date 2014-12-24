@@ -7,10 +7,11 @@ package ldb
 import (
 	"bytes"
 	"encoding/binary"
+  "fmt"
 
+	"github.com/conformal/goleveldb/leveldb"
 	"github.com/hlandauf/btcdb"
 	"github.com/hlandauf/btcwire"
-	"github.com/conformal/goleveldb/leveldb"
 )
 
 type txUpdateObj struct {
@@ -209,6 +210,39 @@ func (db *LevelDb) FetchTxByShaList(txShaList []*btcwire.ShaHash) []*btcdb.TxLis
 		replies[i] = &txlre
 	}
 	return replies
+}
+
+func (db *LevelDb) fetchLastSpentTx(txSha *btcwire.ShaHash) (r *btcdb.TxListReply, err error) {
+  txList, err := db.getTxFullySpent(txSha)
+  if err != nil {
+    return nil, err
+  }
+
+  if len(txList) == 0 {
+    return nil, fmt.Errorf("no transactions found")
+  }
+
+  stx := txList[len(txList)-1]
+  tx, blockSha, _, _, err := db.fetchTxDataByLoc(stx.blkHeight, stx.txoff, stx.txlen, []byte{})
+  if err != nil {
+    return nil, err
+  }
+
+  btxspent := make([]bool, len(tx.TxOut))
+  for i := range btxspent {
+    btxspent[i] = true
+  }
+
+  r = &btcdb.TxListReply{
+    Sha: txSha,
+    Tx: tx,
+    BlkSha: blockSha,
+    Height: stx.blkHeight,
+    TxSpent: btxspent,
+    Err: nil,
+  }
+
+  return
 }
 
 // FetchUnSpentTxByShaList given a array of ShaHash, look up the transactions
